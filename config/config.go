@@ -36,11 +36,9 @@ type Config struct {
 		Port     uint16 `yaml:"port"`
 
 		Database struct {
-			Type string `yaml:"type"`
-			URI  string `yaml:"uri"`
-
-			MaxOpenConns int `yaml:"max_open_conns"`
-			MaxIdleConns int `yaml:"max_idle_conns"`
+			Users string `yaml:"users"`
+			Portals string `yaml:"portals"`
+			Puppets string `yaml:"puppets"`
 		} `yaml:"database"`
 
 		StateStore string `yaml:"state_store_path"`
@@ -62,8 +60,9 @@ type Config struct {
 }
 
 func (config *Config) setDefaults() {
-	config.AppService.Database.MaxOpenConns = 20
-	config.AppService.Database.MaxIdleConns = 2
+	config.AppService.Database.Users = "users.gob.gz"
+	config.AppService.Database.Portals = "portals.gob.gz"
+	config.AppService.Database.Puppets = "puppets.gob.gz"
 	config.Bridge.setDefaults()
 }
 

@@ -17,15 +17,9 @@ appservice:
 
     # Database config.
     database:
-        # The database type. "sqlite3" and "postgres" are supported.
-        type: sqlite3
-        # The database URI.
-        #   SQLite: File name is enough. https://github.com/mattn/go-sqlite3#connection-string
-        #   Postgres: Connection string. For example, postgres://user:password@host/database
-        uri: mautrix-whatsapp.db
-        # Maximum number of connections. Mostly relevant for Postgres.
-        max_open_conns: 20
-        max_idle_conns: 2
+        users: users.gob.gz
+        puppets: puppets.gob.gz
+        portals: portals.gob.gz
 
     # Path to the Matrix room state store.
     state_store_path: ./mx-state.json
@@ -104,7 +98,7 @@ bridge:
     # but causes room avatar/name bugs.
     private_chat_portal_meta: false
 
-    # Allow invite permission for user. User can invite any bots to room with whatsapp 
+    # Allow invite permission for user. User can invite any bots to room with whatsapp
     # users (private chat and groups)
     allow_user_invite: false
 

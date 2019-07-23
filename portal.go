@@ -51,7 +51,7 @@ func (bridge *Bridge) GetPortalByMXID(mxid types.MatrixRoomID) *Portal {
 	defer bridge.portalsLock.Unlock()
 	portal, ok := bridge.portalsByMXID[mxid]
 	if !ok {
-		return bridge.loadDBPortal(bridge.DB.Portal.GetByMXID(mxid), nil)
+		return nil
 	}
 	return portal
 }
@@ -61,51 +61,21 @@ func (bridge *Bridge) GetPortalByJID(key database.PortalKey) *Portal {
 	defer bridge.portalsLock.Unlock()
 	portal, ok := bridge.portalsByJID[key]
 	if !ok {
-		return bridge.loadDBPortal(bridge.DB.Portal.GetByJID(key), &key)
+		return bridge.NewPortalWithJID(key)
 	}
 	return portal
-}
-
-func (bridge *Bridge) GetAllPortals() []*Portal {
-	return bridge.dbPortalsToPortals(bridge.DB.Portal.GetAll())
 }
 
 func (bridge *Bridge) GetAllPortalsByJID(jid types.WhatsAppID) []*Portal {
-	return bridge.dbPortalsToPortals(bridge.DB.Portal.GetAllByJID(jid))
-}
-
-func (bridge *Bridge) dbPortalsToPortals(dbPortals []*database.Portal) []*Portal {
 	bridge.portalsLock.Lock()
-	defer bridge.portalsLock.Unlock()
-	output := make([]*Portal, len(dbPortals))
-	for index, dbPortal := range dbPortals {
-		if dbPortal == nil {
-			continue
+	var portals []*Portal
+	for key, portal := range bridge.portalsByJID {
+		if key.JID == jid {
+			portals = append(portals, portal)
 		}
-		portal, ok := bridge.portalsByJID[dbPortal.Key]
-		if !ok {
-			portal = bridge.loadDBPortal(dbPortal, nil)
-		}
-		output[index] = portal
 	}
-	return output
-}
-
-func (bridge *Bridge) loadDBPortal(dbPortal *database.Portal, key *database.PortalKey) *Portal {
-	if dbPortal == nil {
-		if key == nil {
-			return nil
-		}
-		dbPortal = bridge.DB.Portal.New()
-		dbPortal.Key = *key
-		dbPortal.Insert()
-	}
-	portal := bridge.NewPortal(dbPortal)
-	bridge.portalsByJID[portal.Key] = portal
-	if len(portal.MXID) > 0 {
-		bridge.portalsByMXID[portal.MXID] = portal
-	}
-	return portal
+	bridge.portalsLock.Unlock()
+	return portals
 }
 
 func (portal *Portal) GetUsers() []*User {
@@ -113,6 +83,9 @@ func (portal *Portal) GetUsers() []*User {
 }
 
 func (bridge *Bridge) NewPortal(dbPortal *database.Portal) *Portal {
+	if dbPortal.UserIDs == nil {
+		dbPortal.UserIDs = make(map[types.MatrixUserID]bool)
+	}
 	portal := &Portal{
 		Portal: dbPortal,
 		bridge: bridge,
@@ -123,6 +96,12 @@ func (bridge *Bridge) NewPortal(dbPortal *database.Portal) *Portal {
 		messages: make(chan PortalMessage, 128),
 	}
 	go portal.handleMessageLoop()
+	return portal
+}
+
+func (bridge *Bridge) NewPortalWithJID(key database.PortalKey) *Portal {
+	portal := bridge.NewPortal(&database.Portal{Key: key})
+	bridge.portalsByJID[portal.Key] = portal
 	return portal
 }
 
@@ -215,7 +194,7 @@ func (portal *Portal) isRecentlyHandled(id types.WhatsAppMessageID) bool {
 }
 
 func (portal *Portal) isDuplicate(id types.WhatsAppMessageID) bool {
-	msg := portal.bridge.DB.Message.GetByJID(portal.Key, id)
+	msg := portal.bridge.GetMessageByJID(portal.Key, id)
 	if msg != nil {
 		return true
 	}
@@ -227,7 +206,7 @@ func init() {
 }
 
 func (portal *Portal) markHandled(source *User, message *waProto.WebMessageInfo, mxid types.MatrixEventID) {
-	msg := portal.bridge.DB.Message.New()
+	msg := &database.Message{}
 	msg.Chat = portal.Key
 	msg.JID = message.GetKey().GetId()
 	msg.MXID = mxid
@@ -243,7 +222,8 @@ func (portal *Portal) markHandled(source *User, message *waProto.WebMessageInfo,
 		}
 	}
 	msg.Content = message.Message
-	msg.Insert()
+	portal.LastMessage = msg
+	portal.bridge.SaveMessage(msg)
 
 	portal.recentlyHandledLock.Lock()
 	index := portal.recentlyHandledIndex
@@ -554,7 +534,7 @@ func (portal *Portal) BackfillHistory(user *User, lastMessageTime uint64) error 
 	endBackfill := portal.beginBackfill()
 	defer endBackfill()
 
-	lastMessage := portal.bridge.DB.Message.GetLastInChat(portal.Key)
+	lastMessage := portal.LastMessage
 	if lastMessage == nil {
 		return nil
 	}
@@ -749,6 +729,7 @@ func (portal *Portal) CreateMatrixRoom(user *User) error {
 		return err
 	}
 	portal.MXID = resp.RoomID
+	portal.bridge.portalsByMXID[portal.MXID] = portal
 	portal.Update()
 	if metadata != nil {
 		portal.SyncParticipants(metadata)
@@ -803,7 +784,7 @@ func (portal *Portal) SetReply(content *mautrix.Content, info whatsapp.MessageIn
 	if len(info.QuotedMessageID) == 0 {
 		return
 	}
-	message := portal.bridge.DB.Message.GetByJID(portal.Key, info.QuotedMessageID)
+	message := portal.bridge.GetMessageByJID(portal.Key, info.QuotedMessageID)
 	if message != nil {
 		event, err := portal.MainIntent().GetEvent(portal.MXID, message.MXID)
 		if err != nil {
@@ -817,7 +798,7 @@ func (portal *Portal) SetReply(content *mautrix.Content, info whatsapp.MessageIn
 }
 
 func (portal *Portal) HandleMessageRevoke(user *User, message whatsappExt.MessageRevocation) {
-	msg := portal.bridge.DB.Message.GetByJID(portal.Key, message.Id)
+	msg := portal.bridge.GetMessageByJID(portal.Key, message.Id)
 	if msg == nil {
 		return
 	}
@@ -839,7 +820,7 @@ func (portal *Portal) HandleMessageRevoke(user *User, message whatsappExt.Messag
 		portal.log.Errorln("Failed to redact %s: %v", msg.JID, err)
 		return
 	}
-	msg.Delete()
+	portal.bridge.DeleteMessage(msg)
 }
 
 func (portal *Portal) HandleFakeMessage(source *User, message FakeMessage) {
@@ -1093,7 +1074,7 @@ func (portal *Portal) HandleMatrixMessage(sender *User, evt *mautrix.Event) {
 	replyToID := evt.Content.GetReplyTo()
 	if len(replyToID) > 0 {
 		evt.Content.RemoveReplyFallback()
-		msg := portal.bridge.DB.Message.GetByMXID(replyToID)
+		msg := portal.bridge.GetMessageByMXID(replyToID)
 		if msg != nil && msg.Content != nil {
 			ctxInfo.StanzaId = &msg.JID
 			ctxInfo.Participant = &msg.Sender
@@ -1201,7 +1182,7 @@ func (portal *Portal) HandleMatrixRedaction(sender *User, evt *mautrix.Event) {
 		return
 	}
 
-	msg := portal.bridge.DB.Message.GetByMXID(evt.Redacts)
+	msg := portal.bridge.GetMessageByMXID(evt.Redacts)
 	if msg == nil || msg.Sender != sender.JID {
 		return
 	}
@@ -1238,7 +1219,6 @@ func (portal *Portal) HandleMatrixRedaction(sender *User, evt *mautrix.Event) {
 }
 
 func (portal *Portal) Delete() {
-	portal.Portal.Delete()
 	delete(portal.bridge.portalsByJID, portal.Key)
 	if len(portal.MXID) > 0 {
 		delete(portal.bridge.portalsByMXID, portal.MXID)
@@ -1296,4 +1276,8 @@ func (portal *Portal) HandleMatrixLeave(sender *User) {
 
 func (portal *Portal) HandleMatrixKick(sender *User, event *mautrix.Event) {
 	// TODO
+}
+
+func (portal *Portal) Update() {
+	portal.bridge.portalsChanged = true
 }

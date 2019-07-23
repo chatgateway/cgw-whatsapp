@@ -17,128 +17,16 @@
 package database
 
 import (
-	"bytes"
-	"database/sql"
-	"encoding/json"
-
 	waProto "github.com/Rhymen/go-whatsapp/binary/proto"
-
-	log "maunium.net/go/maulogger/v2"
 
 	"maunium.net/go/mautrix-whatsapp/types"
 )
 
-type MessageQuery struct {
-	db  *Database
-	log log.Logger
-}
-
-func (mq *MessageQuery) New() *Message {
-	return &Message{
-		db:  mq.db,
-		log: mq.log,
-	}
-}
-
-func (mq *MessageQuery) GetAll(chat PortalKey) (messages []*Message) {
-	rows, err := mq.db.Query("SELECT chat_jid, chat_receiver, jid, mxid, sender, timestamp, content FROM message WHERE chat_jid=$1 AND chat_receiver=$2", chat.JID, chat.Receiver)
-	if err != nil || rows == nil {
-		return nil
-	}
-	defer rows.Close()
-	for rows.Next() {
-		messages = append(messages, mq.New().Scan(rows))
-	}
-	return
-}
-
-func (mq *MessageQuery) GetByJID(chat PortalKey, jid types.WhatsAppMessageID) *Message {
-	return mq.get("SELECT chat_jid, chat_receiver, jid, mxid, sender, timestamp, content " +
-		"FROM message WHERE chat_jid=$1 AND chat_receiver=$2 AND jid=$3", chat.JID, chat.Receiver, jid)
-}
-
-func (mq *MessageQuery) GetByMXID(mxid types.MatrixEventID) *Message {
-	return mq.get("SELECT chat_jid, chat_receiver, jid, mxid, sender, timestamp, content " +
-		"FROM message WHERE mxid=$1", mxid)
-}
-
-func (mq *MessageQuery) GetLastInChat(chat PortalKey) *Message {
-	msg := mq.get("SELECT chat_jid, chat_receiver, jid, mxid, sender, timestamp, content " +
-		"FROM message WHERE chat_jid=$1 AND chat_receiver=$2 ORDER BY timestamp DESC LIMIT 1", chat.JID, chat.Receiver)
-	if msg == nil || msg.Timestamp == 0 {
-		// Old db, we don't know what the last message is.
-		return nil
-	}
-	return msg
-}
-
-func (mq *MessageQuery) get(query string, args ...interface{}) *Message {
-	row := mq.db.QueryRow(query, args...)
-	if row == nil {
-		return nil
-	}
-	return mq.New().Scan(row)
-}
-
 type Message struct {
-	db  *Database
-	log log.Logger
-
 	Chat      PortalKey
 	JID       types.WhatsAppMessageID
 	MXID      types.MatrixEventID
 	Sender    types.WhatsAppID
 	Timestamp uint64
 	Content   *waProto.Message
-}
-
-func (msg *Message) Scan(row Scannable) *Message {
-	var content []byte
-	err := row.Scan(&msg.Chat.JID, &msg.Chat.Receiver, &msg.JID, &msg.MXID, &msg.Sender, &msg.Timestamp, &content)
-	if err != nil {
-		if err != sql.ErrNoRows {
-			msg.log.Errorln("Database scan failed:", err)
-		}
-		return nil
-	}
-
-	msg.decodeBinaryContent(content)
-
-	return msg
-}
-
-func (msg *Message) decodeBinaryContent(content []byte) {
-	msg.Content = &waProto.Message{}
-	reader := bytes.NewReader(content)
-	dec := json.NewDecoder(reader)
-	err := dec.Decode(msg.Content)
-	if err != nil {
-		msg.log.Warnln("Failed to decode message content:", err)
-	}
-}
-
-func (msg *Message) encodeBinaryContent() []byte {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	err := enc.Encode(msg.Content)
-	if err != nil {
-		msg.log.Warnln("Failed to encode message content:", err)
-	}
-	return buf.Bytes()
-}
-
-func (msg *Message) Insert() {
-	_, err := msg.db.Exec("INSERT INTO message (chat_jid, chat_receiver, jid, mxid, sender, timestamp, content) " +
-		"VALUES ($1, $2, $3, $4, $5, $6, $7)",
-		msg.Chat.JID, msg.Chat.Receiver, msg.JID, msg.MXID, msg.Sender, msg.Timestamp, msg.encodeBinaryContent())
-	if err != nil {
-		msg.log.Warnfln("Failed to insert %s@%s: %v", msg.Chat, msg.JID, err)
-	}
-}
-
-func (msg *Message) Delete() {
-	_, err := msg.db.Exec("DELETE FROM message WHERE chat_jid=$1 AND chat_receiver=$2 AND jid=$3", msg.Chat.JID, msg.Chat.Receiver, msg.JID)
-	if err != nil {
-		msg.log.Warnfln("Failed to delete %s@%s: %v", msg.Chat, msg.JID, err)
-	}
 }

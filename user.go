@@ -68,7 +68,7 @@ func (bridge *Bridge) GetUserByMXID(userID types.MatrixUserID) *User {
 	defer bridge.usersLock.Unlock()
 	user, ok := bridge.usersByMXID[userID]
 	if !ok {
-		return bridge.loadDBUser(bridge.DB.User.GetByMXID(userID), &userID)
+		return bridge.NewUserWithMXID(userID)
 	}
 	return user
 }
@@ -78,7 +78,7 @@ func (bridge *Bridge) GetUserByJID(userID types.WhatsAppID) *User {
 	defer bridge.usersLock.Unlock()
 	user, ok := bridge.usersByJID[userID]
 	if !ok {
-		return bridge.loadDBUser(bridge.DB.User.GetByJID(userID), nil)
+		return nil
 	}
 	return user
 }
@@ -86,40 +86,23 @@ func (bridge *Bridge) GetUserByJID(userID types.WhatsAppID) *User {
 func (bridge *Bridge) GetAllUsers() []*User {
 	bridge.usersLock.Lock()
 	defer bridge.usersLock.Unlock()
-	dbUsers := bridge.DB.User.GetAll()
-	output := make([]*User, len(dbUsers))
-	for index, dbUser := range dbUsers {
-		user, ok := bridge.usersByMXID[dbUser.MXID]
-		if !ok {
-			user = bridge.loadDBUser(dbUser, nil)
-		}
-		output[index] = user
+	output := make([]*User, len(bridge.usersByMXID))
+	i := 0
+	for _, user := range bridge.usersByMXID {
+		output[i] = user
+		i++
 	}
 	return output
 }
 
-func (bridge *Bridge) loadDBUser(dbUser *database.User, mxid *types.MatrixUserID) *User {
-	if dbUser == nil {
-		if mxid == nil {
-			return nil
-		}
-		dbUser = bridge.DB.User.New()
-		dbUser.MXID = *mxid
-		dbUser.Insert()
-	}
-	user := bridge.NewUser(dbUser)
+func (bridge *Bridge) NewUserWithMXID(mxid types.MatrixUserID) *User {
+	user := bridge.NewUser(&database.User{MXID: mxid})
 	bridge.usersByMXID[user.MXID] = user
-	if len(user.JID) > 0 {
-		bridge.usersByJID[user.JID] = user
-	}
-	if len(user.ManagementRoom) > 0 {
-		bridge.managementRooms[user.ManagementRoom] = user
-	}
 	return user
 }
 
 func (user *User) GetPortals() []*Portal {
-	keys := user.User.GetPortalKeys()
+	keys := user.PortalKeys
 	portals := make([]*Portal, len(keys))
 
 	user.bridge.portalsLock.Lock()
@@ -127,8 +110,8 @@ func (user *User) GetPortals() []*Portal {
 
 	for i, key := range keys {
 		portal, ok := user.bridge.portalsByJID[key]
-		if !ok {
-			portal = user.bridge.loadDBPortal(user.bridge.DB.Portal.GetByJID(key), &key)
+		if ok {
+			continue
 		}
 		portals[i] = portal
 	}
@@ -183,7 +166,7 @@ func (user *User) Connect(evenIfNoSession bool) bool {
 	conn, err := whatsapp.NewConn(timeout * time.Second)
 	if err != nil {
 		user.log.Errorln("Failed to connect to WhatsApp:", err)
-		msg := format.RenderMarkdown("\u26a0 Failed to connect to WhatsApp server. "+
+		msg := format.RenderMarkdown("\u26a0 Failed to connect to WhatsApp server. " +
 			"This indicates a network problem on the bridge server. See bridge logs for more info.")
 		_, _ = user.bridge.Bot.SendMessageEvent(user.ManagementRoom, mautrix.EventMessage, msg)
 		return false
@@ -202,7 +185,7 @@ func (user *User) RestoreSession() bool {
 			return true
 		} else if err != nil {
 			user.log.Errorln("Failed to restore session:", err)
-			msg := format.RenderMarkdown("\u26a0 Failed to connect to WhatsApp. Make sure WhatsApp "+
+			msg := format.RenderMarkdown("\u26a0 Failed to connect to WhatsApp. Make sure WhatsApp " +
 				"on your phone is reachable and use `reconnect` to try connecting again.")
 			_, _ = user.bridge.Bot.SendMessageEvent(user.ManagementRoom, mautrix.EventMessage, msg)
 			return false
@@ -312,6 +295,7 @@ func (user *User) Login(ce *CommandEvent) {
 	user.Connected = true
 	user.ConnectionErrors = 0
 	user.JID = strings.Replace(user.Conn.Info.Wid, whatsappExt.OldUserSuffix, whatsappExt.NewUserSuffix, 1)
+	user.bridge.usersByJID[user.JID] = user
 	user.SetSession(&session)
 	ce.Reply("Successfully logged in, synchronizing chats...")
 	user.PostLogin()
@@ -374,10 +358,14 @@ func (user *User) syncPortals(createAll bool) {
 		portalKeys = append(portalKeys, portal.Key)
 	}
 	user.log.Infoln("Read chat list, updating user-portal mapping")
-	err := user.SetPortalKeys(portalKeys)
-	if err != nil {
-		user.log.Warnln("Failed to update user-portal mapping:", err)
+	for _, pk := range user.PortalKeys {
+		delete(user.bridge.GetPortalByJID(pk).UserIDs, user.MXID)
 	}
+	user.PortalKeys = portalKeys
+	for _, pk := range user.PortalKeys {
+		user.bridge.GetPortalByJID(pk).UserIDs[user.MXID] = true
+	}
+	user.Update()
 	sort.Sort(chats)
 	limit := user.bridge.Config.Bridge.InitialChatSync
 	if limit < 0 {
@@ -418,9 +406,20 @@ func (user *User) updateLastConnectionIfNecessary() {
 	}
 }
 
+func (user *User) UpdateLastConnection() {
+	user.LastConnection = uint64(time.Now().Unix())
+}
+
+type stackTracer interface {
+	StackTrace() errors.StackTrace
+}
+
 func (user *User) HandleError(err error) {
 	if errors.Cause(err) != whatsapp.ErrInvalidWsData {
 		user.log.Errorln("WhatsApp error:", err)
+		if st, ok := err.(stackTracer); ok {
+			user.log.Errorln(fmt.Sprint(st.StackTrace()))
+		}
 	}
 	if closed, ok := err.(*whatsapp.ErrConnectionClosed); ok {
 		user.Connected = false
@@ -615,7 +614,7 @@ func (user *User) HandleMsgInfo(info whatsappExt.MsgInfo) {
 		go func() {
 			intent := user.bridge.GetPuppetByJID(info.SenderJID).IntentFor(portal)
 			for _, id := range info.IDs {
-				msg := user.bridge.DB.Message.GetByJID(portal.Key, id)
+				msg := user.bridge.GetMessageByJID(portal.Key, id)
 				if msg == nil {
 					continue
 				}
@@ -694,4 +693,8 @@ func (user *User) HandleJsonMessage(message string) {
 
 func (user *User) HandleRawMessage(message *waProto.WebMessageInfo) {
 	user.updateLastConnectionIfNecessary()
+}
+
+func (user *User) Update() {
+	user.bridge.usersChanged = true
 }

@@ -344,8 +344,8 @@ func (handler *CommandHandler) CommandDeleteAllPortals(ce *CommandEvent) {
 	portals := ce.User.GetPortals()
 	portalsToDelete := make([]*Portal, 0, len(portals))
 	for _, portal := range portals {
-		users := portal.GetUserIDs()
-		if len(users) == 1 && users[0] == ce.User.MXID {
+		ok1, ok2 := portal.UserIDs[ce.User.MXID]
+		if len(portal.UserIDs) == 1 && ok1 && ok2 {
 			portalsToDelete = append(portalsToDelete, portal)
 		}
 	}

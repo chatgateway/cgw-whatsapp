@@ -27,7 +27,6 @@ import (
 	log "maunium.net/go/maulogger/v2"
 
 	"maunium.net/go/mautrix-appservice"
-	"maunium.net/go/mautrix-whatsapp/database/upgrades"
 
 	"maunium.net/go/mautrix-whatsapp/config"
 	"maunium.net/go/mautrix-whatsapp/database"
@@ -35,10 +34,10 @@ import (
 )
 
 var configPath = flag.MakeFull("c", "config", "The path to your config file.", "config.yaml").String()
+
 //var baseConfigPath = flag.MakeFull("b", "base-config", "The path to the example config file.", "example-config.yaml").String()
 var registrationPath = flag.MakeFull("r", "registration", "The path where to save the appservice registration.", "registration.yaml").String()
 var generateRegistration = flag.MakeFull("g", "generate-registration", "Generate registration and quit.", "false").Bool()
-var ignoreUnsupportedDatabase = flag.Make().LongKey("ignore-unsupported-database").Usage("Run even if database is too new").Default("false").Bool()
 var wantHelp, _ = flag.MakeHelpFlag()
 
 func (bridge *Bridge) GenerateRegistration() {
@@ -68,7 +67,6 @@ type Bridge struct {
 	EventProcessor *appservice.EventProcessor
 	MatrixHandler  *MatrixHandler
 	Config         *config.Config
-	DB             *database.Database
 	Log            log.Logger
 	StateStore     *AutosavingStateStore
 	Bot            *appservice.IntentAPI
@@ -85,6 +83,11 @@ type Bridge struct {
 	puppets             map[types.WhatsAppID]*Puppet
 	puppetsByCustomMXID map[types.MatrixUserID]*Puppet
 	puppetsLock         sync.Mutex
+
+	usersChanged   bool
+	portalsChanged bool
+	puppetsChanged bool
+	stopSaveLoop   chan bool
 }
 
 func NewBridge() *Bridge {
@@ -96,6 +99,7 @@ func NewBridge() *Bridge {
 		portalsByJID:        make(map[database.PortalKey]*Portal),
 		puppets:             make(map[types.WhatsAppID]*Puppet),
 		puppetsByCustomMXID: make(map[types.MatrixUserID]*Puppet),
+		stopSaveLoop:        make(chan bool, 1),
 	}
 
 	var err error
@@ -138,14 +142,16 @@ func (bridge *Bridge) Init() {
 	bridge.AS.StateStore = bridge.StateStore
 
 	bridge.Log.Debugln("Initializing database")
-	bridge.DB, err = database.New(bridge.Config.AppService.Database.Type, bridge.Config.AppService.Database.URI)
-	if err != nil && (err != upgrades.UnsupportedDatabaseVersion || !*ignoreUnsupportedDatabase) {
-		bridge.Log.Fatalln("Failed to initialize database:", err)
+	if err = bridge.LoadUsers(); err != nil {
+		bridge.Log.Fatalln("Failed to load users:", err)
 		os.Exit(14)
+	} else if err = bridge.LoadPortals(); err != nil {
+		bridge.Log.Fatalln("Failed to load portals:", err)
+		os.Exit(15)
+	} else if err = bridge.LoadPuppets(); err != nil {
+		bridge.Log.Fatalln("Failed to load puppets:", err)
+		os.Exit(16)
 	}
-
-	bridge.DB.SetMaxOpenConns(bridge.Config.AppService.Database.MaxOpenConns)
-	bridge.DB.SetMaxIdleConns(bridge.Config.AppService.Database.MaxIdleConns)
 
 	bridge.Log.Debugln("Initializing Matrix event processor")
 	bridge.EventProcessor = appservice.NewEventProcessor(bridge.AS)
@@ -155,17 +161,13 @@ func (bridge *Bridge) Init() {
 }
 
 func (bridge *Bridge) Start() {
-	err := bridge.DB.Init(bridge.Config.AppService.Database.Type)
-	if err != nil {
-		bridge.Log.Fatalln("Failed to initialize database:", err)
-		os.Exit(15)
-	}
 	bridge.Log.Debugln("Starting application service HTTP server")
 	go bridge.AS.Start()
 	bridge.Log.Debugln("Starting event processor")
 	go bridge.EventProcessor.Start()
 	go bridge.UpdateBotProfile()
 	go bridge.StartUsers()
+	go bridge.SaveLoop()
 }
 
 func (bridge *Bridge) UpdateBotProfile() {
@@ -210,6 +212,7 @@ func (bridge *Bridge) StartUsers() {
 }
 
 func (bridge *Bridge) Stop() {
+	bridge.stopSaveLoop <- true
 	bridge.AS.Stop()
 	bridge.EventProcessor.Stop()
 	for _, user := range bridge.usersByJID {
@@ -227,6 +230,13 @@ func (bridge *Bridge) Stop() {
 	err := bridge.StateStore.Save()
 	if err != nil {
 		bridge.Log.Warnln("Failed to save state store:", err)
+	}
+	if err = bridge.SaveUsers(); err != nil {
+		bridge.Log.Warnln("Failed to save users:", err)
+	} else if err = bridge.SavePortals(); err != nil {
+		bridge.Log.Warnln("Failed to save puppets:", err)
+	} else if err = bridge.SavePuppets(); err != nil {
+		bridge.Log.Warnln("Failed to save puppets:", err)
 	}
 }
 

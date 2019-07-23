@@ -186,7 +186,7 @@ func (puppet *Puppet) handleReceiptEvent(portal *Portal, event *mautrix.Event) {
 		} else if _, ok = readReceipt[puppet.CustomMXID].(map[string]interface{}); !ok {
 			continue
 		}
-		message := puppet.bridge.DB.Message.GetByMXID(eventID)
+		message := puppet.bridge.GetMessageByMXID(eventID)
 		if message == nil {
 			continue
 		}

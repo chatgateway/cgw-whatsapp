@@ -63,17 +63,7 @@ func (bridge *Bridge) GetPuppetByJID(jid types.WhatsAppID) *Puppet {
 	defer bridge.puppetsLock.Unlock()
 	puppet, ok := bridge.puppets[jid]
 	if !ok {
-		dbPuppet := bridge.DB.Puppet.Get(jid)
-		if dbPuppet == nil {
-			dbPuppet = bridge.DB.Puppet.New()
-			dbPuppet.JID = jid
-			dbPuppet.Insert()
-		}
-		puppet = bridge.NewPuppet(dbPuppet)
-		bridge.puppets[puppet.JID] = puppet
-		if len(puppet.CustomMXID) > 0 {
-			bridge.puppetsByCustomMXID[puppet.CustomMXID] = puppet
-		}
+		return bridge.NewPuppetWithJID(jid)
 	}
 	return puppet
 }
@@ -83,44 +73,13 @@ func (bridge *Bridge) GetPuppetByCustomMXID(mxid types.MatrixUserID) *Puppet {
 	defer bridge.puppetsLock.Unlock()
 	puppet, ok := bridge.puppetsByCustomMXID[mxid]
 	if !ok {
-		dbPuppet := bridge.DB.Puppet.GetByCustomMXID(mxid)
-		if dbPuppet == nil {
-			return nil
-		}
-		puppet = bridge.NewPuppet(dbPuppet)
-		bridge.puppets[puppet.JID] = puppet
-		bridge.puppetsByCustomMXID[puppet.CustomMXID] = puppet
+		return nil
 	}
 	return puppet
 }
 
-func (bridge *Bridge) GetAllPuppetsWithCustomMXID() []*Puppet {
-	return bridge.dbPuppetsToPuppets(bridge.DB.Puppet.GetAllWithCustomMXID())
-}
-
-func (bridge *Bridge) GetAllPuppets() []*Puppet {
-	return bridge.dbPuppetsToPuppets(bridge.DB.Puppet.GetAll())
-}
-
-func (bridge *Bridge) dbPuppetsToPuppets(dbPuppets []*database.Puppet) []*Puppet {
-	bridge.puppetsLock.Lock()
-	defer bridge.puppetsLock.Unlock()
-	output := make([]*Puppet, len(dbPuppets))
-	for index, dbPuppet := range dbPuppets {
-		if dbPuppet == nil {
-			continue
-		}
-		puppet, ok := bridge.puppets[dbPuppet.JID]
-		if !ok {
-			puppet = bridge.NewPuppet(dbPuppet)
-			bridge.puppets[dbPuppet.JID] = puppet
-			if len(dbPuppet.CustomMXID) > 0 {
-				bridge.puppetsByCustomMXID[dbPuppet.CustomMXID] = puppet
-			}
-		}
-		output[index] = puppet
-	}
-	return output
+func (bridge *Bridge) GetAllPuppetsWithCustomMXID() map[types.MatrixUserID]*Puppet {
+	return bridge.puppetsByCustomMXID
 }
 
 func (bridge *Bridge) NewPuppet(dbPuppet *database.Puppet) *Puppet {
@@ -136,6 +95,12 @@ func (bridge *Bridge) NewPuppet(dbPuppet *database.Puppet) *Puppet {
 					whatsappExt.NewUserSuffix, "", 1)),
 			bridge.Config.Homeserver.Domain),
 	}
+}
+
+func (bridge *Bridge) NewPuppetWithJID(jid types.WhatsAppID) *Puppet {
+	puppet := bridge.NewPuppet(&database.Puppet{JID: jid})
+	bridge.puppets[puppet.JID] = puppet
+	return puppet
 }
 
 type Puppet struct {
@@ -293,4 +258,8 @@ func (puppet *Puppet) Sync(source *User, contact whatsapp.Contact) {
 	if update {
 		puppet.Update()
 	}
+}
+
+func (puppet *Puppet) Update() {
+	puppet.bridge.puppetsChanged = true
 }

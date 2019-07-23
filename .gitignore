@@ -7,3 +7,4 @@
 *.json
 *.db
 *.log
+*.gob.gz
