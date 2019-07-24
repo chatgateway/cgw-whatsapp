@@ -36,7 +36,8 @@ type Config struct {
 		Port     uint16 `yaml:"port"`
 
 		Database struct {
-			Users string `yaml:"users"`
+			Sync    string `yaml:"sync"`
+			Users   string `yaml:"users"`
 			Portals string `yaml:"portals"`
 			Puppets string `yaml:"puppets"`
 		} `yaml:"database"`
@@ -60,6 +61,7 @@ type Config struct {
 }
 
 func (config *Config) setDefaults() {
+	config.AppService.Database.Sync = "next_batch.txt"
 	config.AppService.Database.Users = "users.gob.gz"
 	config.AppService.Database.Portals = "portals.gob.gz"
 	config.AppService.Database.Puppets = "puppets.gob.gz"

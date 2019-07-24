@@ -119,7 +119,11 @@ func (bridge *Bridge) Init() {
 		fmt.Fprintln(os.Stderr, "Failed to initialize AppService:", err)
 		os.Exit(11)
 	}
-	bridge.AS.Init()
+	_, err = bridge.AS.Init()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to initialize AppService:", err)
+		os.Exit(11)
+	}
 	bridge.Bot = bridge.AS.BotIntent()
 
 	bridge.Log = log.Create()
@@ -151,7 +155,11 @@ func (bridge *Bridge) Init() {
 	} else if err = bridge.LoadPuppets(); err != nil {
 		bridge.Log.Fatalln("Failed to load puppets:", err)
 		os.Exit(16)
+	} else if err = bridge.LoadNextBatch(); err != nil {
+		bridge.Log.Warnln("Failed to load next batch token:", err)
 	}
+
+	bridge.AS.Sync.Enabled = true
 
 	bridge.Log.Debugln("Initializing Matrix event processor")
 	bridge.EventProcessor = appservice.NewEventProcessor(bridge.AS)
@@ -237,6 +245,8 @@ func (bridge *Bridge) Stop() {
 		bridge.Log.Warnln("Failed to save puppets:", err)
 	} else if err = bridge.SavePuppets(); err != nil {
 		bridge.Log.Warnln("Failed to save puppets:", err)
+	} else if err = bridge.SaveNextBatch(); err != nil {
+		bridge.Log.Warnln("Failed to save next batch token:", err)
 	}
 }
 

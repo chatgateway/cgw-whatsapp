@@ -17,6 +17,7 @@ appservice:
 
     # Database config.
     database:
+        sync: next_batch.txt
         users: users.gob.gz
         puppets: puppets.gob.gz
         portals: portals.gob.gz

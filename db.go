@@ -20,6 +20,7 @@ import (
 	"compress/gzip"
 	"encoding/gob"
 	"errors"
+	"io/ioutil"
 	"os"
 	"time"
 
@@ -67,9 +68,27 @@ func save(path string, data interface{}) error {
 	}
 }
 
+func (bridge *Bridge) LoadNextBatch() error {
+	dat, err := ioutil.ReadFile(bridge.Config.AppService.Database.Sync)
+	if err != nil {
+		bridge.AS.Sync.NextBatch = ""
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	bridge.AS.Sync.NextBatch = string(dat)
+	return nil
+}
+
+func (bridge *Bridge) SaveNextBatch() error {
+	return ioutil.WriteFile(bridge.Config.AppService.Database.Sync,  []byte(bridge.AS.Sync.NextBatch), 0600)
+}
+
 func (bridge *Bridge) SaveLoop() {
 	bridge.Log.Debugln("Starting db save loop")
 	tick := time.NewTicker(30 * time.Second)
+	prevNextBatch := bridge.AS.Sync.NextBatch
 	for range tick.C {
 		select {
 		case <-tick.C:
@@ -93,6 +112,13 @@ func (bridge *Bridge) SaveLoop() {
 					bridge.Log.Warnln("Failed to save puppets:", err)
 				}
 				bridge.puppetsChanged = false
+			}
+			if prevNextBatch != bridge.AS.Sync.NextBatch {
+				err := bridge.SaveNextBatch()
+				if err != nil {
+					bridge.Log.Warnln("Failed to write next batch token:", err)
+				}
+				prevNextBatch = bridge.AS.Sync.NextBatch
 			}
 		case <-bridge.stopSaveLoop:
 			return
